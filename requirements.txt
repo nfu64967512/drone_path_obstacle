@@ -1,0 +1,26 @@
+# 無人機路徑規劃工具依賴套件
+# 安裝命令: pip install -r requirements.txt
+
+# 核心GUI套件
+tkinter
+
+# 地圖顯示套件
+tkintermapview>=1.24
+
+# 數學和科學計算
+numpy>=1.21.0
+
+# 可選：如果需要更多數學功能
+# scipy>=1.7.0
+# matplotlib>=3.5.0
+
+# 資料處理（如果需要）
+# pandas>=1.3.0
+
+# 檔案處理
+# openpyxl>=3.0.9  # Excel檔案處理
+
+# 開發和測試工具（可選）
+# pytest>=6.2.0
+# flake8>=4.0.0
+# black>=22.0.0
