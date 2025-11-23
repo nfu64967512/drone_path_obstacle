@@ -178,10 +178,11 @@ class ObstacleManager:
         # 找出距離中位數作為閾值
         sorted_dists = sorted([d[2] for d in distances])
         median_dist = sorted_dists[len(sorted_dists) // 2]
+        max_dist = sorted_dists[-1]
         
-        # 閾值：中位數的60%
-        # 大於閾值的是掃描線，小於閾值的是轉向段
-        threshold = median_dist * 0.6
+        # 閾值：使用最大距離的50%，確保只識別真正的長掃描線
+        # 避免將短距離誤判為掃描線
+        threshold = max(median_dist * 0.6, max_dist * 0.5)
         
         # 識別掃描線段
         for idx_start, idx_end, dist in distances:
@@ -219,17 +220,33 @@ class ObstacleManager:
         # 生成繞行路徑（沿著障礙物安全邊界的切線）
         detour_points = self._generate_tangent_detour(p1, p2, obstacle, intersection_points[0], intersection_points[1])
         
-        # 驗證繞行點是否在邊界內
-        valid_detour = []
-        for dp in detour_points:
-            if boundary_corners is None or self.point_in_polygon(dp, boundary_corners):
-                valid_detour.append(dp)
-        
-        if not valid_detour:
-            # 無法生成有效繞行路徑，返回原始線段
-            logger.warning("無法生成有效繞行路徑，保留原始線段")
+        if not detour_points:
+            logger.warning(f"繞行點生成失敗，掃描線長度可能太短")
             return [p1, p2]
         
+        # 驗證繞行點是否在邊界內
+        valid_detour = []
+        for i, dp in enumerate(detour_points):
+            if boundary_corners is None:
+                # 如果沒有邊界限制，直接接受
+                valid_detour.append(dp)
+                logger.info(f"繞行點{i+1}: 無邊界限制，直接接受")
+            elif self.point_in_polygon(dp, boundary_corners):
+                valid_detour.append(dp)
+                logger.info(f"繞行點{i+1}: 在邊界內")
+            else:
+                logger.warning(f"繞行點{i+1}: ({dp[0]:.6f}, {dp[1]:.6f}) 超出邊界，嘗試調整")
+                # 嘗試將點拉回到線段方向上
+                # 這樣可以保持部分繞行效果
+        
+        if not valid_detour:
+            # 無法生成有效繞行路徑，記錄詳細信息
+            logger.warning(f"無法生成有效繞行路徑: p1={p1}, p2={p2}, 障礙物中心={obstacle.center}")
+            logger.warning(f"交點數量: {len(intersection_points)}, 繞行點數量: {len(detour_points)}")
+            logger.warning(f"boundary_corners提供: {boundary_corners is not None}")
+            return [p1, p2]
+        
+        logger.info(f"成功生成繞行路徑: {len(valid_detour)}個繞行點")
         # 返回完整的分段路徑：起點 → 繞行點 → 終點
         return [p1] + valid_detour + [p2]
     
@@ -250,18 +267,19 @@ class ObstacleManager:
         cx, cy = obstacle.center
         radius = obstacle.effective_radius
         
-        # 轉換為米制座標
-        avg_lat_rad = math.radians(cx)
-        cos_lat = math.cos(avg_lat_rad)
+        # 使用與waypoint_generator相同的座標轉換
+        cosLat0 = math.cos(math.radians(cx))
         
         def to_meters(lat, lon):
-            y = (lat - cx) * (math.pi / 180) * self.earth_radius_m
-            x = (lon - cy) * (math.pi / 180) * self.earth_radius_m * cos_lat
+            # 與waypoint_generator.py的project_and_rotate一致
+            x = (lon - cy) * self.earth_radius_m * cosLat0
+            y = (lat - cx) * self.earth_radius_m
             return x, y
         
         def to_latlon(x, y):
-            lat = cx + y / self.earth_radius_m * (180 / math.pi)
-            lon = cy + x / (self.earth_radius_m * cos_lat) * (180 / math.pi)
+            # 與waypoint_generator.py的rotate_back_to_geographic一致
+            lat = y / self.earth_radius_m + cx
+            lon = x / (self.earth_radius_m * cosLat0) + cy
             return lat, lon
         
         x1, y1 = to_meters(lat1, lon1)
@@ -313,18 +331,19 @@ class ObstacleManager:
         cx, cy = obstacle.center
         radius = obstacle.effective_radius * 1.2  # 增加20%安全邊距
         
-        # 轉換為米制座標系統
-        avg_lat_rad = math.radians(cx)
-        cos_lat = math.cos(avg_lat_rad)
+        # 使用與waypoint_generator相同的座標轉換
+        cosLat0 = math.cos(math.radians(cx))
         
         def to_meters(lat, lon):
-            y = (lat - cx) * (math.pi / 180) * self.earth_radius_m
-            x = (lon - cy) * (math.pi / 180) * self.earth_radius_m * cos_lat
+            # 與waypoint_generator.py的project_and_rotate一致
+            x = (lon - cy) * self.earth_radius_m * cosLat0
+            y = (lat - cx) * self.earth_radius_m
             return x, y
         
         def to_latlon(x, y):
-            lat = cx + y / self.earth_radius_m * (180 / math.pi)
-            lon = cy + x / (self.earth_radius_m * cos_lat) * (180 / math.pi)
+            # 與waypoint_generator.py的rotate_back_to_geographic一致
+            lat = y / self.earth_radius_m + cx
+            lon = x / (self.earth_radius_m * cosLat0) + cy
             return lat, lon
         
         # 計算掃描線的方向向量
@@ -346,6 +365,12 @@ class ObstacleManager:
         perp_x = -uy  # 向左垂直
         perp_y = ux
         
+        # 計算線段中點到障礙物中心的向量
+        mid_x = (x1 + x2) / 2
+        mid_y = (y1 + y2) / 2
+        to_center_x = 0 - mid_x  # 障礙物中心在原點
+        to_center_y = 0 - mid_y
+        
         # 生成兩個候選繞行方向
         detour_offset = radius
         
@@ -357,19 +382,20 @@ class ObstacleManager:
         detour2_x = -perp_x * detour_offset
         detour2_y = -perp_y * detour_offset
         
-        # 選擇距離原點較近的繞行方向（簡化選擇邏輯）
-        dist1_sq = detour1_x ** 2 + detour1_y ** 2
-        dist2_sq = detour2_x ** 2 + detour2_y ** 2
+        # 選擇遠離障礙物中心的方向
+        # 計算兩個繞行方向與"遠離中心"方向的點積
+        dot1 = -detour1_x * to_center_x - detour1_y * to_center_y
+        dot2 = -detour2_x * to_center_x - detour2_y * to_center_y
         
-        if dist1_sq < dist2_sq:
+        if dot1 > dot2:
             detour_x, detour_y = detour1_x, detour1_y
         else:
             detour_x, detour_y = detour2_x, detour2_y
         
         # 生成進入和離開繞行的航點
-        # 在掃描線的25%和75%位置設置繞行點
-        t_entry = 0.25
-        t_exit = 0.75
+        # 在掃描線的30%和70%位置設置繞行點，確保繞行更平滑
+        t_entry = 0.3
+        t_exit = 0.7
         
         entry_x = x1 + ux * length * t_entry + detour_x
         entry_y = y1 + uy * length * t_entry + detour_y
@@ -380,6 +406,8 @@ class ObstacleManager:
         # 轉換回地理座標
         entry_point = to_latlon(entry_x, entry_y)
         exit_point = to_latlon(exit_x, exit_y)
+        
+        logger.info(f"繞行點生成: 掃描線長度={length:.2f}m, 繞行偏移={detour_offset:.2f}m")
         
         return [entry_point, exit_point]
     
@@ -430,13 +458,21 @@ class ObstacleManager:
         """計算兩點間距離（公尺）- 平面近似"""
         lat1, lon1 = p1
         lat2, lon2 = p2
-        dlat = math.radians(lat2 - lat1)
-        dlon = math.radians(lon2 - lon1)
-        avg_lat = math.radians((lat1 + lat2) / 2)
         
-        x = dlon * math.cos(avg_lat)
-        y = dlat
-        distance = math.sqrt(x*x + y*y) * self.earth_radius_m
+        # 使用平均緯度計算經度縮放
+        avg_lat = (lat1 + lat2) / 2
+        cos_lat = math.cos(math.radians(avg_lat))
+        
+        # 緯度和經度差值（度）
+        dlat = lat2 - lat1
+        dlon = lon2 - lon1
+        
+        # 轉換為公尺
+        dy = dlat * self.earth_radius_m
+        dx = dlon * self.earth_radius_m * cos_lat
+        
+        # 計算距離
+        distance = math.sqrt(dx*dx + dy*dy)
         return distance
     
     def line_intersects_circle(self, p1: Tuple[float, float], 
@@ -452,12 +488,13 @@ class ObstacleManager:
         lat2, lon2 = p2
         cx, cy = center
         
-        avg_lat_rad = math.radians(cx)
-        cos_lat = math.cos(avg_lat_rad)
+        # 使用與waypoint_generator相同的座標轉換
+        cosLat0 = math.cos(math.radians(cx))
         
         def to_meters(lat, lon):
-            y = (lat - cx) * (math.pi / 180) * self.earth_radius_m
-            x = (lon - cy) * (math.pi / 180) * self.earth_radius_m * cos_lat
+            # 與waypoint_generator.py的project_and_rotate一致
+            x = (lon - cy) * self.earth_radius_m * cosLat0
+            y = (lat - cx) * self.earth_radius_m
             return x, y
 
         x1, y1 = to_meters(lat1, lon1)
